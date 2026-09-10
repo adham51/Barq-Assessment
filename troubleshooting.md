@@ -16,7 +16,7 @@ Keep chronological entries. Copy this block for each meaningful investigation.
 
 Do not fabricate a failed attempt just to fill the template. Record actual attempts.
 
-## Entry 1: Healthcheck error and instance ID mismatch — 2026-09-10 11:40
+## Entry 1: Healthcheck error and instance ID mismatch — 2026-09-10 1:30 (egypt time)
 
 - **Symptom**: 
 Ran docker compose up. Containers started, but both app-01 and app-02 logged repeated GET /healthz HTTP/1.1 404 warnings every 5 seconds. Additionally, docker compose ps showed both application containers marked as (unhealthy).
@@ -76,3 +76,100 @@ Initially suspected that the Python applications were crashing or failing to sta
 
 - **Remaining uncertainty**: 
   None. Both issues resolved and verified via docker compose ps health status and container logs.
+
+## Entry 2: NGINX and Flask connectivity - 2026-09-10 6:05 pm
+
+- **Symptom**: The original host request failed because Compose mapped host port `8080`
+  to NGINX port `81`, while NGINX listened on port `80`.
+
+- **Initial evidence**:
+  ```text
+  curl -i http://127.0.0.1:8080/
+  curl: (56) Recv failure: Connection reset by peer
+  ```
+  This meant the TCP connection was closed before `curl` received an HTTP response. It
+  did not mean that Flask had returned an application error. I checked the published
+  port and loaded NGINX configuration to identify where the connection stopped:
+  ```text
+  docker port nginx
+  81/tcp -> 127.0.0.1:8080
+  nginx: listen 80;
+  ```
+  The host port was forwarded to container port `81`, but NGINX listened on `80`, so the
+  request was sent to the wrong container port and did not reach the configured NGINX
+  server.
+
+- **Investigation**: After changing the mapping to `8080:80`, the request returned:
+  ```text
+  HTTP/1.1 502 Bad Gateway
+  ```
+  This proved the request now reached NGINX. NGINX logged:
+  ```text
+  connect() failed (111: Connection refused) while connecting to upstream
+  upstream: "http://172.19.0.2:8080/health"
+  ```
+  A direct request from the NGINX container produced:
+  ```text
+  curl: (7) Failed to connect to app-01 port 8080 after 12 ms: Could not connect to server
+  ```
+  Meanwhile, the app logs showed local `/health` requests returning `200`. This separated
+  the two issues: NGINX was now receiving traffic, but Flask was not accepting connections
+  through the Docker network.
+
+- **Root cause**: Flask listened on `127.0.0.1`, which is reachable only inside the app
+  container. NGINX connects through the Docker network.
+
+- **Fix**:
+  ```yaml
+  # docker-compose.yml
+  APP_HOST: "0.0.0.0"
+  ports:
+    - "127.0.0.1:${PUBLIC_PORT:-8080}:80"
+  ```
+  ```nginx
+  # nginx/nginx.conf
+  server app-01:8080 max_fails=0;
+  server app-02:8080 max_fails=0;
+  ```
+
+- **Retest evidence**:
+  ```text
+
+  # 1. Container Health & Port Mapping Verification
+  NAME       IMAGE                                                                                        COMMAND                  SERVICE    CREATED          STATUS                    PORTS
+app-01     barq-assessment-app-01                                                                       "python -m app.server"   app-01     33 minutes ago   Up 33 minutes (healthy)   8080/tcp
+app-02     barq-assessment-app-02                                                                       "python -m app.server"   app-02     33 minutes ago   Up 33 minutes (healthy)   8080/tcp
+nginx      nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236    "/docker-entrypoint.…"   nginx      33 minutes ago   Up 33 minutes             127.0.0.1:8080->80/tcp
+postgres   postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685   "docker-entrypoint.s…"   postgres   33 minutes ago   Up 33 minutes (healthy)   5432/tcp
+redis      redis:7.4-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf     "docker-entrypoint.s…"   redis      33 minutes ago   Up 33 minutes (healthy)   6379/tcp
+
+# 2. Internal Container-to-Container Routing (Nginx to App )
+  $ docker compose -p barq-assessment exec nginx curl -i http://app-01:8080/health
+  HTTP/1.1 200 OK (X-Instance-ID: app-01)
+
+  $ docker compose -p barq-assessment exec nginx curl -i http://app-02:8080/health
+  HTTP/1.1 200 OK (X-Instance-ID: app-02)
+
+  # 3. External Host test
+
+  curl -i http://127.0.0.1:8080/health: HTTP/1.1 200 OK
+  curl -i http://127.0.0.1:8080/: HTTP/1.1 200 OK
+
+
+  # 4. Upstream Round-Robin Load Balancing Distribution
+  for i in $(seq 1 20); do
+  curl -s http://127.0.0.1:8080/instance
+  done
+
+    {"instance_id":"app-01","service":"barq-api","status":"ok","version":"2.0.0"}
+    {"instance_id":"app-02","service":"barq-api","status":"ok","version":"2.0.0"}
+    {"instance_id":"app-01","service":"barq-api","status":"ok","version":"2.0.0"}
+    {"instance_id":"app-02","service":"barq-api","status":"ok","version":"2.0.0"}
+  ```
+  The public requests succeeded through NGINX, and the direct request from inside the
+  NGINX container succeeded through the Docker network to `app-01`.
+
+- **Related commit**: Proposed message: `Fix NGINX and Flask connectivity`.
+
+- **Remaining uncertainty**: This retest confirms the NGINX-to-Flask request path only.
+  Now I'll check any port misconfigurations in DB and ensure security 
