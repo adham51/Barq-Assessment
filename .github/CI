@@ -1,0 +1,192 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write   # lets Actions upload SARIF to the Security tab
+
+jobs:
+  # ---- required by the assessment brief: this is the job that must pass/fail ----
+  validate:
+    name: Build, start, and validate environment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Syntax check shell scripts
+        run: |
+          bash -n backup.sh
+          bash -n restore.sh
+          bash -n failure_test.sh
+
+      - name: Syntax check python scripts
+        run: python3 -m py_compile validate.py
+
+      - name: Prepare env file
+        run: cp .env.example .env
+
+      - name: Validate compose file
+        run: docker compose -p barq-assessment config -q
+
+      - name: Build images
+        run: docker compose -p barq-assessment build
+
+      - name: Start stack
+        run: docker compose -p barq-assessment up -d
+
+      - name: Wait for readiness
+        run: |
+          for i in $(seq 1 30); do
+            STATUS=$(curl -sf http://127.0.0.1:8080/ready \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('status'))" 2>/dev/null || echo not_ready)
+            if [ "$STATUS" = "ready" ]; then
+              echo "environment ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "environment never became ready" >&2
+          docker compose -p barq-assessment ps
+          docker compose -p barq-assessment logs --no-color
+          exit 1
+
+      - name: Run validation
+        run: python3 validate.py --url http://127.0.0.1:8080
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -p barq-assessment logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: docker compose -p barq-assessment down -v
+
+  # ---- extra credit: security scanning, parallel, non-blocking ----
+
+  secret_scanning:
+    name: Gitleaks secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sast_scan:
+    name: SonarCloud SAST scan
+    runs-on: ubuntu-latest
+    needs: secret_scanning
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarCloud scan
+        uses: SonarSource/sonarqube-scan-action@v8.2.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.organization=adham51
+            -Dsonar.projectKey=adham51_Barq-Assessment
+
+  sca_scan:
+    name: Trivy SCA scan + SBOM
+    runs-on: ubuntu-latest
+    needs: secret_scanning
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trivy filesystem (SCA) scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-sca-report.sarif'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'   # report-only, doesn't fail CI
+
+      - name: Upload SCA SARIF to Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-sca-report.sarif
+          category: trivy-sca
+
+      - name: Upload SCA report artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-sca-report
+          path: trivy-sca-report.sarif
+
+      - name: Generate SBOM
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: 'fs'
+          format: 'cyclonedx'
+          output: 'sbom.json'
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbom
+          path: sbom.json
+
+  container_security:
+    name: Build and scan app image
+    runs-on: ubuntu-latest
+    needs: secret_scanning
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build app image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: barq-app:latest
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: 'barq-app:latest'
+          format: 'sarif'
+          output: 'trivy-image-report.sarif'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
+
+      - name: Upload image SARIF to Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image-report.sarif
+          category: trivy-container-image
+
+      - name: Upload image report artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-image-report
+          path: trivy-image-report.sarif
