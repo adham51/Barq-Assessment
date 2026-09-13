@@ -10,6 +10,9 @@ It shipped broken; this repo is the investigation, the fix, and the tests provin
 > demonstrated in the video and landed as a documentation-only commit afterward (see
 > `docs/EVIDENCE_INDEX.md`).
 
+
+## Architecture Overview
+
 ![Architecture](assets/architecture.png)
 
 ## Setup
@@ -137,12 +140,12 @@ Full entries: [troubleshooting.md](troubleshooting.md).
 Full evidence: [log_analysis.md](log_analysis.md).
 
 **How do requests flow? Why these ports, networks and readiness checks?**  
-Client → NGINX (`:8080` on `frontend`) → round-robin to `app-01`/`app-02` (on both `frontend` and
-`backend` networks) → PostgreSQL/Redis (`backend`, `internal: true`). Only NGINX publishes a host port;
-Postgres/Redis have none. `backend` is isolated so NGINX has no network path to the database or
-cache even if compromised. `/health` checks the process only (fast, no dependency); `/ready`
-checks Postgres + Redis so the app is never marked ready before it can actually serve real
-requests — see [decisions.md #2](decisions.md#decision-2) and security_review.md #2/#3.
+Client → NGINX (`:8090` on `frontend`) → round-robin to `app-01`/`app-02`/`app-03` (on both `frontend`
+and `backend` networks) → PostgreSQL/Redis (`backend`, `internal: true`). Only NGINX publishes a
+host port; Postgres/Redis have none. `backend` is isolated so NGINX has no network path to the
+database or cache even if compromised. `/health` checks the process only (fast, no dependency);
+`/ready` checks Postgres + Redis so no instance is ever marked ready before it can actually serve
+real requests — see [decisions.md #2](decisions.md#decision-2) and security_review.md #2/#3.
 
 **Why these timeouts, retries, restart settings and resource limits?**  
 `proxy_next_upstream off` and `max_fails=0` are deliberate: they keep a backend failure visible
@@ -163,7 +166,9 @@ The four security jobs (`secret_scanning`, `sast_scan`, `sca_scan`,
 `container_security`) run in parallel and are deliberately non-blocking: both Trivy scans are set
 to `exit-code: '0'`, so they upload SARIF/SBOM findings to the Security tab but never fail the
 job even on a HIGH/CRITICAL result, by design. So green CI does **not** prove the app is free of
-security findings.
+security findings.  
+
+
 **Which single points of failure remain? How would you fix them in production?**  
 NGINX itself (a single proxy container), PostgreSQL (a single instance, no replica), and Redis
 (a single instance, no replica) are all SPOFs.   
