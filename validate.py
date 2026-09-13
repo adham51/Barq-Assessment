@@ -138,10 +138,18 @@ def _discover_app_instances(project):
     """Return set of app-* container names owned by this project."""
     apps = set()
     try:
-        all_names = _docker_json("ps", "-a", "--format", "{{.Names}}")
-        for name in all_names.splitlines():
+        # docker ps --format "{{.Names}}" prints plain text, one name per
+        # line, not JSON, so this can't go through _docker_json's json.loads.
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        for name in result.stdout.splitlines():
+            name = name.strip()
             if name.startswith("app-"):
                 info = _inspect(name)
+                if info is None:
+                    continue
                 label = info.get("Config", {}).get("Labels", {}).get("com.docker.compose.project", "")
                 if label == project:
                     apps.add(name)
