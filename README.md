@@ -1,97 +1,182 @@
 <img src="assets/barq-logo.svg" alt="BARQ Systems" width="180">
 
-# DevOps Internship Task - Starter v2
+# BARQ Academy — DevOps Internship Task
 
-**Due date:** ____________________
+A Flask API behind NGINX, load-balanced across two instances, backed by PostgreSQL and Redis.
+It shipped broken; this repo is the investigation, the fix, and the tests proving it.
 
-**Time window:** 4 calendar days from the invitation email date/time.
+> This README describes the current, running two-instance setup on port **8080**. The
+> assessment's live video changes it to **three instances on port 8090** — that change is
+> demonstrated in the video and landed as a documentation-only commit afterward (see
+> `docs/EVIDENCE_INDEX.md`).
 
-Read [the task](assessment/TASK.md), then [the API contract](assessment/APPLICATION.md).
-Everyone receives this same release. The environment is intentionally broken.
-Hidden issue types and count are not disclosed. Investigate this project; do not replace it.
+![Architecture](assets/architecture.png)
 
-## Included
-
-- Flask API, PostgreSQL, Redis, Docker and NGINX starter files.
-- Three historical logs, a question template and documentation templates.
-- App-only tests and a recorded challenge script.
-- Unimplemented validation, failure-test and backup/restore placeholders.
-
-Use synthetic lab accounts/data only. Supplied values are for this disposable exercise,
-never for real services. Keep the lab on your local machine; do not expose it publicly.
-
-## Before you start
-
-- Linux or WSL2, Python 3.12, Git and Docker with Compose.
-- Docker Desktop must use Linux containers. Run shell scripts in Linux/WSL.
-- Suggested capacity: 2 CPU cores, 4 GB free RAM and 3 GB free disk, plus Docker overhead.
-- Internet for first downloads and GitHub. No cloud account or paid registry required.
-- Use a machine where container names app-01, app-02, nginx, postgres and redis are unused.
-  Do not delete someone else's containers to free those names.
-- Intended public port: 8080 before the video, 8090 after the live change.
-  If either is occupied, ask the organizer for a documented workstation exception.
-
-## Start
-
-Clone the supplied Git bundle/repository. Keep both release commits and the v2 baseline tag.
-Set your own Git name/email before making changes.
-
-From the repository root:
+## Setup
 
 ```bash
-git status
-git log -2 --oneline
-cp .env.example .env
-docker version
-docker compose version
+git clone <this-repo> && cd barq-academy
+cp .env.example .env        # edit POSTGRES_PASSWORD before first run
+```
+
+## Build & start
+
+```bash
 docker compose -p barq-assessment up --build -d
-docker compose -p barq-assessment ps -a
-docker compose -p barq-assessment logs --no-color
+docker compose -p barq-assessment ps
 ```
 
-The initial environment is not expected to pass. Record what actually happens.
-The intended URL is http://127.0.0.1:8080; do not assume the starter configuration is correct.
+All five containers (`app-01`, `app-02`, `nginx`, `postgres`, `redis`) should show `healthy`
+within about 15 seconds. If not: `docker compose -p barq-assessment logs --no-color`.
 
-App-only checks use fake dependencies, not real SQL/Redis or Docker networking:
+## Endpoints
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/` | GET | app response + instance identity |
+| `/health` | GET | process liveness only |
+| `/ready` | GET | 200 only if PostgreSQL + Redis both respond, else 503 |
+| `/instance` | GET | which backend answered (also in `X-Instance-ID` header) |
+| `/records` | GET/POST | list / create PostgreSQL records |
+| `/counter` | GET | atomically increments a Redis-backed counter |
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m unittest discover -s tests -v
+curl -i http://127.0.0.1:8080/ready
+curl -H 'Content-Type: application/json' -d '{"title":"proof"}' http://127.0.0.1:8080/records
+curl http://127.0.0.1:8080/records
+curl http://127.0.0.1:8080/counter
+curl http://127.0.0.1:8080/instance
 ```
 
-## Your work
-
-- Complete [assessment/TASK.md](assessment/TASK.md).
-- Implement validate.py, failure_test.py, backup.sh and restore.sh, or documented equivalents.
-  Placeholders deliberately exit 2; they are unfinished deliverables, not validation evidence.
-- Create .github/workflows/ci.yml yourself.
-- Complete the root report templates and docs/EVIDENCE_INDEX.md.
-- Add architecture.png or architecture.pdf.
-- Replace this README with copyable setup/build/run/test/failure/backup/restore/cleanup commands.
-- Commit as you work. Do not commit real secrets, backups, virtual environments or challenge state.
-
-## Recorded challenge
-
-Use the supplied video_challenge.sh unchanged. Read its code if needed; do not run it early.
-After repairing the environment, run it once, for the first time in the video working copy,
-during the continuous 12-18 minute recording. The script requires healthy services, both
-initial instances and the target network layout. Preflight failures make no runtime changes.
+## Test
 
 ```bash
-./video_challenge.sh
+python3 validate.py --url http://127.0.0.1:8080
 ```
 
-If you deliberately changed the project name, pass --project YOUR_PROJECT.
-An organizer-approved alternate local URL can be passed with --url http://127.0.0.1:PORT.
-The script touches only matching Compose-owned lab containers/networks.
-Keep the receipt in .assessment/challenge.json for the evidence index. Do not delete the
-one-run marker to retry. A local marker is not tamper-proof; ownership is judged from evidence.
-Do not use docker compose down to reset the runtime challenge.
+Checks public access, every endpoint, both backend identities, Postgres/Redis readiness,
+network isolation, and that no forbidden host ports are published. Prints PASS/FAIL per check
+and exits non-zero on any failure — this is what CI runs on every push/PR.
 
-## Stop safely
+## Failure test
 
-Outside the recorded challenge, docker compose -p barq-assessment down stops this lab.
-Do not use --volumes during persistence tests. Avoid global Docker prune/cleanup commands.
-Back up anything you need before removing containers; investigate whether data actually persists.
+```bash
+./failure_test.sh
+```
+
+Stops `app-01`, hits `/instance` repeatedly while it's down (prints real responses and
+`NO RESPONSE` lines, not a silent wait), brings it back, and proves round-robin resumes across
+both identities.
+
+## Backup & restore
+
+```bash
+./backup.sh                                   # pg_dump -> backups/barq_tasks_<UTC-timestamp>.sql.gz
+./restore.sh backups/barq_tasks_<ts>.sql.gz   # add --clean to restore into an empty database
+```
+
+Persistence proof used throughout this project:
+```bash
+curl -d '{"title":"persistence proof"}' -H 'Content-Type: application/json' http://127.0.0.1:8080/records
+./backup.sh
+docker compose -p barq-assessment up -d --force-recreate app-01 app-02 postgres   # volume kept
+curl http://127.0.0.1:8080/records   # record still there
+```
+
+## Stop / cleanup
+
+```bash
+docker compose -p barq-assessment down          # keeps postgres-data / redis-data volumes
+docker compose -p barq-assessment down --volumes  # only when you intend to wipe all data
+```
+
+## Log analysis
+
+Three historical logs (`logs/access.log`, `logs/error.log`, `logs/application.log`) covering a
+30-minute incident window were parsed and correlated with `scripts/log_analysis.py`
+(`python3 scripts/log_analysis.py`). Full answers, evidence, and a timeline: [log_analysis.md](log_analysis.md).
+
+## CI
+
+
+`.github/workflows/ci.yml` runs on every push and pull request: checkout → shell/Python syntax
+checks → `docker compose config` → build → start → wait for `/ready` → `validate.py`. I also integrated DevSecOps, Security-first, 'shift-left' approach into the CI pipeline, which runs Gitleaks, SonarCloud, Trivy and SBOM generation as additional security gates. A failing
+`validate.py` fails the required job.
+
+## Documentation
+
+| File | Contents |
+|---|---|
+| [troubleshooting.md](troubleshooting.md) | Investigation journal — symptoms, hypotheses, failed attempts, fixes |
+| [decisions.md](decisions.md) | Technical decisions, alternatives, trade-offs |
+| [security_review.md](security_review.md) | 10 concrete risks/improvements, implemented vs. planned |
+| [log_analysis.md](log_analysis.md) | Full log analysis with reproducible evidence |
+| [AI_USAGE.md](AI_USAGE.md) | AI tools used, what was changed/rejected, how it was verified |
+| [docs/EVIDENCE_INDEX.md](docs/EVIDENCE_INDEX.md) | requirement → file/output → commit → video timestamp |
+
+## Required questions
+
+**What failed first? What proved the cause? Which failed attempt taught you something?**
+
+1. The first visible failure was the healthcheck. Both app containers showed `unhealthy` because the healthcheck probed `/healthz` while Flask only implements `/health`.
+
+2. This was proved by reading the container logs (repeated 404s) side by side with the source route table. The same investigation surfaced a second, unrelated bug: `app-02`'s `INSTANCE_ID` was hardcoded to `"app-01"`, so both containers reported the same identity.
+
+3. The failed attempt that taught the most was assuming a Postgres/Redis connectivity problem first. The logs showed the process was handling HTTP fine, which pointed the investigation to the route/config layer instead.
+
+Full entries: [troubleshooting.md](troubleshooting.md).
+
+**What patterns did the logs reveal? How did you avoid double-counting requests?**
+
+1. Three distinct, non-overlapping incidents showed up inside one 30-minute window: a proxy-level connection refusal to one backend (502s), a two-part dependency failure (Redis timeouts, then separately a Postgres auth failure, not one incident as an early draft wrongly assumed), and a proxy read-timeout window (504s) where the app actually finished the request late.
+
+2. Double-counting was avoided by deduplicating on `(request_id, timestamp)` per file before counting anything.
+
+3. A retry (a comma-separated `upstream` field) was treated as one client request with multiple attempts, not as multiple requests.
+
+Full evidence: [log_analysis.md](log_analysis.md).
+
+**How do requests flow? Why these ports, networks and readiness checks?**  
+Client → NGINX (`:8080` on `frontend`) → round-robin to `app-01`/`app-02` (on both `frontend` and
+`backend` networks) → PostgreSQL/Redis (`backend`, `internal: true`). Only NGINX publishes a host port;
+Postgres/Redis have none. `backend` is isolated so NGINX has no network path to the database or
+cache even if compromised. `/health` checks the process only (fast, no dependency); `/ready`
+checks Postgres + Redis so the app is never marked ready before it can actually serve real
+requests — see [decisions.md #2](decisions.md#decision-2) and security_review.md #2/#3.
+
+**Why these timeouts, retries, restart settings and resource limits?**  
+`proxy_next_upstream off` and `max_fails=0` are deliberate: they keep a backend failure visible
+in logs/tests as the assessment asks, instead of NGINX silently masking it with a retry (would
+hide the failure that `failure_test.sh` needs to prove) — full rationale in
+[decisions.md #2](decisions.md#decision-2). The restart policy and the exact per-service CPU/memory
+numbers are explained in [decisions.md #6](decisions.md#decision-6).
+
+**When should validation fail? What does green CI prove, or not prove?**  
+`validate.py` should fail whenever public access, any endpoint, either backend identity, or
+Postgres/Redis readiness doesn't respond correctly, or when network isolation/forbidden ports are
+violated.
+
+Green CI proves the stack builds, starts, becomes ready, and passes those checks on a fresh
+runner at that commit, that's the required `validate` job, and it's the only job whose failure is meant to fail the run. 
+
+The four security jobs (`secret_scanning`, `sast_scan`, `sca_scan`,
+`container_security`) run in parallel and are deliberately non-blocking: both Trivy scans are set
+to `exit-code: '0'`, so they upload SARIF/SBOM findings to the Security tab but never fail the
+job even on a HIGH/CRITICAL result, by design. So green CI does **not** prove the app is free of
+security findings.
+**Which single points of failure remain? How would you fix them in production?**  
+NGINX itself (a single proxy container), PostgreSQL (a single instance, no replica), and Redis
+(a single instance, no replica) are all SPOFs.   
+
+Production fix: an externally managed load
+balancer like AWS ALB or multiple NGINX replicas, managed/replicated PostgreSQL (or a HA setup with
+automatic failover), and Redis replication or a managed Redis service. 
+
+
+**What would you improve? How did you verify AI-assisted work?**  
+Next: DAST in CI, severity-gated security scanning instead of report-only, encrypted off-host
+backups, and replacing the current "observable but not resilient" NGINX failover with real
+passive health checks for production use. Every AI-assisted change in this repo was independently
+re-run and checked against raw output before being accepted — details and specific corrections
+(including one I initially got wrong and caught by cross-checking two independent analyses) are
+in [AI_USAGE.md](AI_USAGE.md).

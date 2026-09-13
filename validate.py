@@ -5,7 +5,9 @@ Checks public access, all endpoints, all backends, PostgreSQL/Redis
 readiness, network isolation, and prohibited host ports.
 
 Usage:
-    python validate.py [--url http://127.0.0.1:8080] [--project barq-assessment]
+    python validate.py [--url http://127.0.0.1:8080]
+        [--project barq-assessment]
+        [--expected-instances app-01,app-02]
 
 Exit codes: 0 = all pass, non-zero = one or more failures.
 """
@@ -21,6 +23,7 @@ _pass = 0
 _fail = 0
 
 
+# prints one validation result and updates the totals
 def _result(name, ok, detail=""):
     global _pass, _fail
     tag = "PASS" if ok else "FAIL"
@@ -32,12 +35,14 @@ def _result(name, ok, detail=""):
         _fail += 1
 
 
+# sends a json get request to the public endpoint
 def _get(url, timeout=5):
     req = urllib.request.Request(url)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.status, json.loads(resp.read())
 
 
+# sends a json post request to create test data
 def _post(url, data, timeout=5):
     payload = json.dumps(data).encode()
     req = urllib.request.Request(url, data=payload,
@@ -46,6 +51,7 @@ def _post(url, data, timeout=5):
         return resp.status, json.loads(resp.read())
 
 
+# runs a docker command and returns its json output
 def _docker_json(*args):
     result = subprocess.run(
         ["docker", *args], capture_output=True, text=True, timeout=30,
@@ -55,6 +61,7 @@ def _docker_json(*args):
     return json.loads(result.stdout.strip())
 
 
+# reads one container and returns none when it is missing
 def _inspect(name):
     try:
         info = _docker_json("inspect", name)
@@ -63,6 +70,7 @@ def _inspect(name):
         return None
 
 
+# gets the host port bindings from a container inspection
 def _host_bindings(info):
     """Return all host port bindings for a container."""
     ports = info.get("NetworkSettings", {}).get("Ports", {})
@@ -75,6 +83,7 @@ def _host_bindings(info):
     ]
 
 
+# waits for both database and redis to report ready
 def wait_for_readiness(base_url, timeout=60, interval=2):
     """Wait for PostgreSQL and Redis readiness with a bounded timeout."""
     print("\n=== Waiting for readiness ===")
@@ -124,6 +133,7 @@ def wait_for_readiness(base_url, timeout=60, interval=2):
 # Checks
 # ---------------------------------------------------------------------------
 
+# finds app containers that belong to the selected compose project
 def _discover_app_instances(project):
     """Return set of app-* container names owned by this project."""
     apps = set()
@@ -140,7 +150,8 @@ def _discover_app_instances(project):
     return apps or {"app-01", "app-02"}
 
 
-def check_network_isolation(project):
+# checks the required frontend and internal backend network layout
+def check_network_isolation(project, expected_instances):
     print("\n=== Network isolation ===")
     app01 = _inspect("app-01")
     if not app01:
@@ -165,9 +176,8 @@ def check_network_isolation(project):
     except Exception:
         _result("Backend network is internal", False, "cannot inspect")
 
-    app_containers = _discover_app_instances(project)
     required = {}
-    for app in app_containers:
+    for app in expected_instances:
         required[app] = {"frontend", "backend"}
     required["nginx"] = {"frontend"}
     required["postgres"] = {"backend"}
@@ -189,7 +199,8 @@ def check_network_isolation(project):
                 f"expected={expected_nets}, actual={actual_nets}")
 
 
-def check_port_exposure(public_port):
+# checks that only nginx publishes the expected host port
+def check_port_exposure(public_port, expected_instances):
     print("\n=== Port exposure ===")
 
     for name in ("postgres", "redis"):
@@ -204,7 +215,7 @@ def check_port_exposure(public_port):
                 f"host_ports={list(host_bindings.keys())}" if host_bindings else "no host mappings")
 
     # Apps must not publish any host ports.
-    for name in ("app-01", "app-02"):
+    for name in expected_instances:
         info = _inspect(name)
 
         if not info:
@@ -249,6 +260,7 @@ def check_port_exposure(public_port):
     )
 
 
+# checks the public api endpoints and their real dependencies
 def check_endpoints(base_url):
     print("\n=== Endpoint checks ===")
 
@@ -317,6 +329,7 @@ def check_endpoints(base_url):
         _result("GET /counter", False, str(exc))
 
 
+# confirms repeated public requests reach every expected backend
 def check_backends_serving(base_url, expected_instances, iterations=20):
     print("\n=== All backends serving ===")
     seen = set()
@@ -336,6 +349,7 @@ def check_backends_serving(base_url, expected_instances, iterations=20):
     )
 
 
+# parses options and runs the complete environment validation
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
 
@@ -351,10 +365,24 @@ def main():
         help="Docker Compose project name (default: barq-assessment)"
     )
 
+    parser.add_argument(
+        "--expected-instances",
+        default="app-01,app-02",
+        help=(
+            "Comma-separated app identities expected through NGINX "
+            "(default: app-01,app-02)"
+        ),
+    )
+
     args = parser.parse_args()
 
     base_url = args.url.rstrip("/")
     project = args.project
+    expected_instances = {
+        value.strip() for value in args.expected_instances.split(",") if value.strip()
+    }
+    if not expected_instances:
+        parser.error("--expected-instances must contain at least one app identity")
     parsed = urlparse(base_url)
     public_port = parsed.port or 80
 
@@ -365,17 +393,16 @@ def main():
     if not wait_for_readiness(base_url):
         sys.exit(1)
 
-    check_network_isolation(project)
-    check_port_exposure(public_port)
-    check_endpoints(base_url)
-
-    expected_instances = _discover_app_instances(project)
-
+    discovered_instances = _discover_app_instances(project)
     _result(
-        "Exactly two app instances exist",
-        expected_instances == {"app-01", "app-02"},
-        f"instances={sorted(expected_instances)}"
+        "Expected app instances exist",
+        discovered_instances == expected_instances,
+        f"instances={sorted(discovered_instances)}, expected={sorted(expected_instances)}",
     )
+
+    check_network_isolation(project, expected_instances)
+    check_port_exposure(public_port, expected_instances)
+    check_endpoints(base_url)
 
     check_backends_serving(base_url, expected_instances)
 
