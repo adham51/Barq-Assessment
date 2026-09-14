@@ -56,7 +56,7 @@ jobs:
           exit 1
 
       - name: Run validation
-        run: python3 validate.py --url http://127.0.0.1:8080
+        run: python3 validate.py --url http://127.0.0.1:8090 --expected-instances app-01,app-02,app-03
 
       - name: Dump logs on failure
         if: failure()
