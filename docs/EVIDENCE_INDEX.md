@@ -14,7 +14,7 @@
   - (plus this pending commit: README DevSecOps section, CI outcome screenshot, this evidence index)
 
 
-## Requirement -> file/output -> commit -> video timestamp
+## Requirement -> video timestamp
 
 | Requirement | Video timestamp |
 |---|---|
