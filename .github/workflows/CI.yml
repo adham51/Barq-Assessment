@@ -42,7 +42,7 @@ jobs:
       - name: Wait for readiness
         run: |
           for i in $(seq 1 30); do
-            STATUS=$(curl -sf http://127.0.0.1:8080/ready \
+            STATUS=$(curl -sf http://127.0.0.1:8090/ready \
               | python3 -c "import sys,json; print(json.load(sys.stdin).get('status'))" 2>/dev/null || echo not_ready)
             if [ "$STATUS" = "ready" ]; then
               echo "environment ready"
