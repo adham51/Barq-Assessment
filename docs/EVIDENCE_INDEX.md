@@ -1,7 +1,7 @@
 # Evidence and submission index
 
 - Repository URL: https://github.com/adham51/Barq-Assessment
-- Final commit: `1be1707` (`fixed .env.example so CI doesn't fail and changed readiness check to match port 8090`)
+- Final commit: `aaba490` 
 - Matching CI run: https://github.com/adham51/Barq-Assessment/actions/runs/34793993734
 - Continuous video URL: https://drive.google.com/file/d/1IoK2CbDiC3nL18Iu73jk0m9wLL9FPU9N/view?usp=sharing
   - Note: video is ~22 minutes, 4 minutes over the brief's 12-18 minute target. Reason: commands
