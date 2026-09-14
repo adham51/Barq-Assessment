@@ -2,13 +2,12 @@
 
 # BARQ Academy — DevOps Internship Task
 
-A Flask API behind NGINX, load-balanced across two instances, backed by PostgreSQL and Redis.
+A Flask API behind NGINX, load-balanced across three instances, backed by PostgreSQL and Redis.
 It shipped broken; this repo is the investigation, the fix, and the tests proving it.
 
-> This README describes the current, running two-instance setup on port **8080**. The
-> assessment's live video changes it to **three instances on port 8090** — that change is
-> demonstrated in the video and landed as a documentation-only commit afterward (see
-> `docs/EVIDENCE_INDEX.md`).
+> This is the final state: three app instances (`app-01`/`02`/`03`) behind NGINX on public port
+> **8090**. The third instance and the port change were added live in the recorded video (see
+> `docs/EVIDENCE_INDEX.md`); this README documents the resulting final setup.
 
 
 ## Architecture Overview
@@ -29,8 +28,8 @@ docker compose -p barq-assessment up --build -d
 docker compose -p barq-assessment ps
 ```
 
-All five containers (`app-01`, `app-02`, `nginx`, `postgres`, `redis`) should show `healthy`
-within about 15 seconds. If not: `docker compose -p barq-assessment logs --no-color`.
+All six containers (`app-01`, `app-02`, `app-03`, `nginx`, `postgres`, `redis`) should show
+`healthy` within about 15 seconds. If not: `docker compose -p barq-assessment logs --no-color`.
 
 ## Endpoints
 
@@ -44,17 +43,17 @@ within about 15 seconds. If not: `docker compose -p barq-assessment logs --no-co
 | `/counter` | GET | atomically increments a Redis-backed counter |
 
 ```bash
-curl -i http://127.0.0.1:8080/ready
-curl -H 'Content-Type: application/json' -d '{"title":"proof"}' http://127.0.0.1:8080/records
-curl http://127.0.0.1:8080/records
-curl http://127.0.0.1:8080/counter
-curl http://127.0.0.1:8080/instance
+curl -i http://127.0.0.1:8090/ready
+curl -H 'Content-Type: application/json' -d '{"title":"proof"}' http://127.0.0.1:8090/records
+curl http://127.0.0.1:8090/records
+curl http://127.0.0.1:8090/counter
+curl http://127.0.0.1:8090/instance
 ```
 
 ## Test
 
 ```bash
-python3 validate.py --url http://127.0.0.1:8080
+python3 validate.py --url http://127.0.0.1:8090 --expected-instances app-01,app-02,app-03
 ```
 
 Checks public access, every endpoint, both backend identities, Postgres/Redis readiness,
@@ -80,10 +79,10 @@ both identities.
 
 Persistence proof used throughout this project:
 ```bash
-curl -d '{"title":"persistence proof"}' -H 'Content-Type: application/json' http://127.0.0.1:8080/records
+curl -d '{"title":"persistence proof"}' -H 'Content-Type: application/json' http://127.0.0.1:8090/records
 ./backup.sh
-docker compose -p barq-assessment up -d --force-recreate app-01 app-02 postgres   # volume kept
-curl http://127.0.0.1:8080/records   # record still there
+docker compose -p barq-assessment up -d --force-recreate app-01 app-02 app-03 postgres   # volume kept
+curl http://127.0.0.1:8090/records   # record still there
 ```
 
 ## Stop / cleanup
@@ -101,10 +100,31 @@ Three historical logs (`logs/access.log`, `logs/error.log`, `logs/application.lo
 
 ## CI
 
+`.github/workflows/CI.yml` runs on every push and pull request: checkout → shell/Python syntax
+checks → `docker compose config` → build → start → wait for `/ready` → `validate.py`. A failing
+`validate.py` fails the required `validate` job.
 
-`.github/workflows/ci.yml` runs on every push and pull request: checkout → shell/Python syntax
-checks → `docker compose config` → build → start → wait for `/ready` → `validate.py`. I also integrated DevSecOps, Security-first, 'shift-left' approach into the CI pipeline, which runs Gitleaks, SonarCloud, Trivy and SBOM generation as additional security gates. A failing
-`validate.py` fails the required job.
+I forgot to re-run validation on 8090/3 instances live during the video, so the fix is committed
+and proven in CI instead: the `validate` job now runs
+`python3 validate.py --url http://127.0.0.1:8090 --expected-instances app-01,app-02,app-03`
+against the final three-instance setup, and the successful run is below.
+
+![CI outcome](assets/CI-outcome.png)
+
+### DevSecOps pipeline
+
+The pipeline is orchestrated via GitHub Actions and runs the following security tools, in
+parallel with the required `validate` job:
+
+- **Secret scanning:** Gitleaks — detects hardcoded secrets, passwords, and API keys.
+- **SAST (Static Application Security Testing):** SonarQube Cloud — analyzes code for bugs,
+  vulnerabilities, and code smells.
+- **SCA (Software Composition Analysis):** Trivy — scans project dependencies for known
+  vulnerabilities and generates an SBOM.
+- **Container security:** Trivy — scans the built Docker image for OS and library vulnerabilities.
+
+These four jobs run in parallel and are deliberately non-blocking (see the "What does green CI
+prove" answer below) — they upload findings to the Security tab but don't gate the required job.
 
 ## Documentation
 
